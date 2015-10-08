@@ -109,7 +109,7 @@
         return module = {id: moduleId};
       }
       id = _resolveRelativeId(base, id);
-      return _require(id);
+      return _require(id, moduleId);
     });
     var result = factory.apply(null, modules);
     return (module && module.exports) || exports || result;
@@ -144,9 +144,9 @@
     return prefix + terms.join('/');
   }
 
-  function _require(id) {
+  function _require(id, moduleId) {
     if (!(id in _modules)) {
-      throw new ReferenceError('The module "' + id + '" has not been loaded');
+      throw new ReferenceError('The module "' + id + '" has not been loaded' + (moduleId ? ' for ' + moduleId : ''));
     }
     return _modules[id];
   }
