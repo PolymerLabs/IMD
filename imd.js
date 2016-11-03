@@ -10,8 +10,260 @@
 (function(scope) {
   'use strict';
 
+  //// AsyncPromises ////
+
+  const useAsynPromises = true;
+  const debugging = {};
+
+  /**
+   * Holds an instance of a module and passes it to fulfill require()
+   * promises when the define() is called with a module as payload or 
+   * a promise that is subsequently fulfilled. 
+   * 
+   * This class is not intended to interfere with the module-registry
+   * and should remain separated from any such logic. Also, to ensure
+   * separation of concerns, this class must be driven by a registry 
+   * class (ie, Modules) in-order to actively resolve a dependency.
+   * 
+   * @class Module
+   */
+  class Module {
+    constructor(id, module) {
+      Object.assign(this, { id, module });
+
+      /**
+       * declarationPromise is a contract for a module that is being required 
+       * or defined. It will be fullfilled once the define() method is called 
+       * and the definePromise is resolved, the declarationPromise is also 
+       * resolved passing the defined module as the only parameter. 
+       */
+      this.declarationPromise = Object.assign(new Promise((resolve, reject) => {
+        Object.assign(this, { resolve, reject });
+      }), { domain: 'declarationPromise', intent: 'module:' + this.id });
+
+      // Resolve declaration for self-defining module
+      if (module) this.define(module);
+    }
+
+    /**
+     * When a declared module is being required by calling the appropriate require 
+     * function of the module registry, the registry will attempt to call require on
+     * the instance to obtain a "declarationPromise" promise that is either resolved 
+     * with the module payload or pending till a "definePromise" is fullfilled.
+     * 
+     * Note: It is assumed that the registry will handle the creation and declaration 
+     * aspects of a module and a module shall remain passive for security concerns.
+     * 
+     * @returns {Promise} declarationPromise or rejected promise
+     * 
+     * @memberOf Module
+     */
+    require() {
+
+      // Return the modules one and only declarationPromise when it exists
+      if (this.declarationPromise instanceof Promise) return this.declarationPromise;
+
+      // Return a rejected promise if integrity is compromised
+      return Object.assign(Promise.reject('Requirement unfulfilled: could not resolve module!'), {
+        domain: 'requireReject', intent: 'module:' + this.id, payload: this.module
+      });
+
+    }
+
+    /**
+     * When a declared module is being defined by calling the appropriate define method 
+     * of the module registry, the registry will attempt to call define on the module 
+     * instance, passing the dependencies and factory processed from the AMD-style 
+     * define call. Dependencies can either be literal module payloads or promises that
+     * need to be resolved and passed to the factory method. Once all dependencies have
+     * been resolved, this "definePromise" will set the resulting module payload to the
+     * instance.module property and resolve the "declarationPromise" passing along the
+     * module to all consumers as needed.
+     * 
+     * Note: It is assumed that the registry will handle the creation and declaration 
+     * aspects of a module and a module shall remain passive for security concerns.
+     * 
+     * @param {any} [dependencies] - Array of module payloads or promises resolved to be passed to factory
+     * @param {any} factory - Module factory function
+     * @returns
+     * 
+     * @memberOf Module
+     */
+    define(dependencies, factory) {
+      // Argument shuffling: dependencies = [], factory = Function
+      const args = Array.from(arguments);
+      dependencies = Array.isArray(args[0]) ? args.shift() : [];
+      factory = args.shift();
+
+      if (debugging.define || debugging.Module) console.log('Module:define %s: ', this.id, { dependencies, factory, arguments });
+
+      // Ensure valid state before define proceeds
+      if (typeof factory != 'function') throw `Define aborted: Factory is not a function!`;                     // Cannot define a module without factory
+      if (this.module) throw `Define blocked: Module has already been defined!`;                                // Cannot redefine module
+      if (this.definitionPromise instanceof Promise) throw `Define blocked: Module is already being defined!`;  // Cannot define until pending define promise is not resolved
+
+      // Define and return a payload-specific definitionPromise
+      return (this.definitionPromise = Object.assign(new Promise((resolve, reject) => {
+        Promise.all(dependencies).then((dependencies) => {
+          if (debugging.define || debugging.Module) console.log('Module:define:dependencies %s: %O', this.id, dependencies);
+
+          // Last check to ensure this.module has not been set by chance of error
+          if (this.module) {
+            if (debugging.define || debugging.Module) console.warn('Module::define::resolve BLOCKED! %s: %o', this.id, { defined: this.module, factory: factory });
+            throw `Define blocked: Module has already been defined!`;
+          }
+
+          try {
+            this.module = Object.assign({}, this.exports, typeof factory != 'function' ? factory : factory.apply(null, dependencies));
+            this.resolve(this.module), resolve(this.module);
+            if (debugging.define || debugging.Module) console.log('Define success %s: %O', this.id, { module: this, factory, dependencies });
+          } catch (exception) {
+            // Report failure to fulfill define promise 
+            console.error(exception), console.warn(`Define failed: Module promise failed to complete`);
+
+            // Reset state to allow subsequent define payloads for pending dependenants
+            this.module = undefined, this.definitionPromise = undefined;
+
+            // Reject "definePromise" (do nothing about "declarationPromise")
+            reject(exception);
+          }
+
+        });
+      }), {
+          domain: 'definitionPromise', intent: 'module:' + this.id, payload: this.module
+        }));
+
+    }
+  }
+
+  /**
+   * Basic module registry class which is responsible for handling all Calls
+   * to define and require by loaded scripts, when delegated to it by the 
+   * respective IMD functions.
+   * 
+   * This class is responsible for the instantiation, declaration, and 
+   * management of all module dependencies. It provides identical define 
+   * and register API's to accept delegated calls, then performs all logic 
+   * needed to instantiate and declare modules once they are being defined 
+   * or required prior to performing the logic that will fullfill either 
+   * tasks.
+   * 
+   * Note: Some functionality has been duplicated from the IMD code to allow
+   * for additional control. It's essential to always ensure that changes in
+   * are appropriately reflected. Only define method delegation is supported.
+   * 
+   * TODO:
+   * 
+   * While the delegate method to define is essential for AMD modules, 
+   * require is only needed for node-style require assignments, with a 
+   * degree of implied auto-loading of dependencies. Until such a feature 
+   * is better defined, this implementation should not be used to delegate
+   * require calls from IMD's _require function. That said, there are no 
+   * foreseen problems if you opt to do so, but be sure to investigate. 
+   * 
+   * A key use-case, where a module might be required, but not at all 
+   * defined by any other script, will result in a declarationPromise being 
+   * indefinitely pending. This use case requires the implementation of a 
+   * timeout mechanism that responds to the completion of script loading.
+   * 
+   * @class Modules
+   */
+  class Modules {
+    constructor() {
+      Object.assign(this, { modules: {} }); // new Map()
+    }
+
+    /**
+     * Internal method, called by define or require, that returns a 
+     * declared module instance or create it based on the id.
+     * 
+     * @param {any} id
+     * @returns
+     * 
+     * @memberOf Modules
+     */
+    declare(id) {
+      return id in this.modules ? this.modules[id] : (this.modules[id] = new Module(id));
+    }
+
+    /**
+     * Used internally to require dependencies in define calls.
+     * 
+     * Note: Use as delegate method for IMD's _require not recommended
+     * 
+     * @param {any} id
+     * @returns
+     * 
+     * @memberOf Modules
+     */
+    require(id) {
+      const module = this.declare(id), payload = module.module, promise = module.require();
+      if (debugging.require || debugging.Modules) console.log('Modules::require', { id, module, payload, promise });
+      return promise;
+    }
+
+    /**
+     * Delegate method to be called by IMD's define function.
+     * 
+     * @param {any} [id]
+     * @param {any} [dependencies]
+     * @param {any} factory
+     * @returns
+     * 
+     * @memberOf Modules
+     */
+    define(id, dependencies, factory) {
+      const args = Array.from(arguments),
+        inferredId = _inferModuleId(), base = inferredId.match(/^(.*?)[^\/]*$/)[1];
+
+      id = (typeof args[0] == 'string') ? args.shift() : inferredId;
+      dependencies = (Array.isArray(args[0])) ? args.shift() : [];
+      factory = args.shift() || dependencies || id;
+
+      if (debugging.define || debugging.Modules) console.log('Modules::define', { id, dependencies, factory, arguments });
+
+      // Prevent duplicate definition but return reference to existing declaration
+      if (id in this.modules) return this.modules[id];
+
+      // Get or create module instance
+      const module = this.declare(id);
+
+      // Compose dependency promise
+      const dependencyTree = dependencies.map(dependency => {
+        if (dependency instanceof Promise) {
+          if (debugging.define || debugging.Modules) console.log('\tPreserving dependency promise: ', dependency);
+          return dependency;
+        }
+        if (typeof dependency == 'object') {
+          if (debugging.define || debugging.Modules) console.log('\tResolving explicit dependency: ', dependency)
+          return dependency;
+        }
+        if ((/^(exports|require|module)$/).test(dependency)) {
+          if (debugging.define || debugging.Modules) console.log('\tResolving internal dependency: %s', dependency)
+          if (dependency === 'exports') return Promise.resolve(module.exports = {});
+          if (dependency === 'require') return Promise.resolve(_require);
+          if (dependency === 'module') return module.define(() => { id });
+        }
+        if (typeof dependency == 'string') {
+          const relativeID = _resolveRelativeId(base, dependency);
+          if (debugging.define || debugging.Modules) console.log('\tResolving implicit dependency: ', relativeID, base);
+          return this.require(relativeID);
+        }
+        if (debugging.define || debugging.Modules) console.log('\tResolving unknown dependency: [%s] %O', typeof dependency, dependency);
+        return dependency;
+      });
+
+      return module.define(dependencyTree, factory);
+
+    }
+
+  }
+
+  //// AsyncPromises ////
+
+
   /** @type {Object<key, *>} A mapping of ids to modules. */
-  var _modules = Object.create(null);
+  var _modules = /* AsyncPromises */ useAsynPromises === true ? new Modules() : /* AsyncPromises */  Object.create(null);
 
   // `define`
 
@@ -32,6 +284,9 @@
    *     pass the exported value directly.
    */
   function define(id, dependencies, factory) {
+    // Delegate to async-modules if _modules is a Modules instance
+    /* AsyncPromises */ if (_modules instanceof Modules) return _modules.define(id, dependencies, factory); /* AsyncPromises */
+
     factory = factory || dependencies || id;
     if (Array.isArray(id)) {
       dependencies = id;
@@ -156,6 +411,12 @@
   }
 
   function _require(id) {
+    /* AsyncPromises */
+    // !!!! Experimental !!!! Delegation only applies to define
+    // // Delegate to async-modules if _modules is a Modules instance
+    // if (_modules instanceof Modules) return _modules.require(id);
+    /* AsyncPromises */
+
     if (!(id in _modules)) {
       throw new ReferenceError('The module "' + id + '" has not been loaded');
     }
