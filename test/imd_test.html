@@ -5,8 +5,8 @@
     <title><%= name %> test</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, minimum-scale=1.0, initial-scale=1, user-scalable=yes">
-    <script src="../../webcomponentsjs/webcomponents-lite.js"></script>
-    <script src="../../web-component-tester/browser.js"></script>
+    <script src="/components/webcomponentsjs/webcomponents-lite.js"></script>
+    <script src="/components/web-component-tester/browser.js"></script>
     <link rel="import" href="../imd.html">
   </head>
   <body>
@@ -20,26 +20,32 @@
           });
         });
 
-        test('a module with no dependencies is executed', () => {
+        test('a module with no dependencies is executed', (done) => {
           let ran = false;
           let m = {};
-          let module = define('test1', () => {
+          // Spec doesn't actually say what define returns. I've chaned
+          // it to return nothing. It could return also return Promise,
+          // which would make it somewhat easier to test but requires a
+          // a small polyfill.
+          define('test1', () => {
             ran = true;
             return m;
           });
+          define(['test1'], (module) => {
+            assert.strictEqual(module, m);
+            done();
+          });
           assert.isTrue(ran);
-          assert.strictEqual(module, m);
         });
 
         test('a module with no id is executed', () => {
           let ran = false;
           let m = {};
-          let module = define(() => {
+          define(() => {
             ran = true;
             return m;
           });
           assert.isTrue(ran);
-          assert.strictEqual(module, m);
         });
 
         test('default dependencies are requre, exports, module', () => {
@@ -67,6 +73,25 @@
           });
         });
 
+        test('out of order dependencies work', (done) => {
+          // make sure that './a' resolves to 'm/a' when loaded from 'm'
+          let aModule = {};
+          define('b', ['a'], (a) => {
+            assert.strictEqual(a, aModule);
+            done();
+          });
+          define('a', aModule);
+        });
+
+        test('relative out-of-order dependencies also work.', (done) => {
+          let aModule = {};
+          // make sure that './a' resolves to 'm/a' when loaded from 'm'
+          define('m', ['./a'], (a) => {
+            assert.strictEqual(a, aModule);
+            done();
+          });
+          define('m/a', aModule);
+        });
       });
     </script>
   </body>
