@@ -12,6 +12,13 @@
 
   /** @type {Object<key, *>} A mapping of ids to modules. */
   var _modules = Object.create(null);
+  /** @type {Object<key, *>} A mapping of ids to deferral specs */
+  var _deferredModules = Object.create(null);
+  /** @type {Object<string, string[]>} Modules to a list of its dependencies. */
+  var _modulesToTheirDirectDependencies = Object.create(null);
+  /** @type {number} The number of modules left to load. */
+  var _modulesRemaining = 0;
+  var _moduleTimer;
 
   // `define`
 
@@ -32,6 +39,9 @@
    *     pass the exported value directly.
    */
   function define(id, dependencies, factory) {
+    if (_moduleTimer) {
+      clearTimeout(_moduleTimer);
+    }
     factory = factory || dependencies || id;
     if (Array.isArray(id)) {
       dependencies = id;
@@ -43,9 +53,6 @@
     if (id.indexOf('\\') !== -1) {
       throw new TypeError('Please use / as module path delimiters');
     }
-    if (id in _modules) {
-      throw new Error('The module "' + id + '" has already been defined');
-    }
     // Extract the entire module path up to the file name. Aka `dirname()`.
     //
     // TODO(nevir): This is naive; doesn't support the vulcanize case.
@@ -53,12 +60,28 @@
     if (base === '') {
       base = id;
     }
-    _modules[id] = _runFactory(id, base, dependencies, factory);
-    return _modules[id];
+    _runDefine(id, base, dependencies, factory);
+    if (_modulesRemaining) {
+      _moduleTimer = setTimeout(function () {
+        var errorMessage = '';
+        for (var dependency in _modulesToTheirDirectDependencies) {
+          if (errorMessage) errorMessage += ', ';
+          errorMessage  += '"' + dependency + '" (required by [' +
+            _modulesToTheirDirectDependencies[dependency]
+              .map(function (name) {return '"' + name + '"';})
+              .join(', ') +
+            '])';
+        }
+        throw Error('Required modules were not loaded before the timeout: ' +
+                    errorMessage);
+      }, define._timeout);
+    }
   }
 
   // Semi-private. We expose this for tests & introspection.
   define._modules = _modules;
+  // Semi-private. We expose this for tests & introspection.
+  define._timeout = 9000;
 
   /**
    * Let other implementations know that this is an AMD implementation.
@@ -66,7 +89,54 @@
    */
   define.amd = {};
 
+
   // Utility
+
+  /**
+   * Calls `factory` with the exported values of `dependencies`, or defers
+   * the call for later if any of its dependencies are not defined yet.
+   *
+   * @param {string} id The id of the module defined by the factory.
+   * @param {string} base The base path that modules should be relative to.
+   * @param {Array<string>} dependencies
+   * @param {function(...*)|*} factory
+   */
+  function _runDefine(id, base, dependencies, factory) {
+    var absoluteDependencies = _makeDependenciesAbsolute(base, dependencies);
+    var modules = new Array(absoluteDependencies.length);
+    var unresolvedDependencyCount = 0;
+    var exports = {};
+    var module = {id: id};
+    absoluteDependencies.forEach(function (dependencyName, ix) {
+      if (dependencyName === 'exports') {
+        modules[ix] = exports;
+      } else if (dependencyName === 'require') {
+        modules[ix] = _require;
+      } else if (dependencyName === 'module') {
+        modules[ix] = module;
+      } else if (dependencyName in _modules) {
+        modules[ix] = _modules[dependencyName];
+      } else {
+        unresolvedDependencyCount++;
+        (_modulesToTheirDirectDependencies[dependencyName] =
+          _modulesToTheirDirectDependencies[dependencyName] || []).push(id);
+      }
+    });
+    if (unresolvedDependencyCount == 0) {
+      _runFactory(id, modules, factory, module, exports);
+    } else {
+      _modulesRemaining++;
+      _deferredModules[id] = {
+        dependencies: absoluteDependencies,
+        unresolvedDependencyCount: unresolvedDependencyCount,
+        modules: modules,
+        module: module,
+        exports: exports,
+        id: id,
+        factory: factory
+      };
+    }
+  }
 
   /** @return {string} A module id inferred from the current document/import. */
   function _inferModuleId() {
@@ -91,36 +161,56 @@
    * Calls `factory` with the exported values of `dependencies`.
    *
    * @param {string} id The id of the module defined by the factory.
-   * @param {string} base The base path that modules should be relative to.
-   * @param {Array<string>} dependencies
+   * @param {Array<*>} modules
    * @param {function(...*)|*} factory
    */
-  function _runFactory(moduleId, base, dependencies, factory) {
-    if (typeof factory !== 'function') return factory;
-
-    var exports = {};
-    var module = {id: moduleId};
-    var modules;
-
-    if (Array.isArray(dependencies)) {
-      modules = dependencies.map(function(id) {
-        if (id === 'exports') {
-          return exports;
-        }
-        if (id === 'require') {
-          return _require;
-        }
-        if (id === 'module') {
-          return module;
-        }
-        id = _resolveRelativeId(base, id);
-        return _require(id);
-      });
-    } else {
-      modules = [_require, exports, module];
+  function _runFactory(moduleId, modules, factory, module, exports) {
+    if (moduleId in _modules) {
+      throw new Error('The module "' + moduleId + '" has already been defined');
     }
-    var result = factory.apply(null, modules);
-    return result || module.exports || exports;
+    if (typeof factory !== 'function') {
+      _modules[moduleId] = factory;
+    } else {
+      var result = factory.apply(null, modules);
+      _modules[moduleId] = (result || module.exports || exports);
+    }
+    _flushDependencies(moduleId);
+  }
+
+  function _flushDependencies(id) {
+    (_modulesToTheirDirectDependencies[id] || []).forEach(function (dependentName) {
+      var dependencySpec = _deferredModules[dependentName];
+      var thisDependencyIndex = dependencySpec.dependencies.indexOf(id);
+      dependencySpec.modules[thisDependencyIndex] = _modules[id];
+      if (dependencySpec.unresolvedDependencyCount == 0) {
+        throw new Error('The module "' + id +
+            '" says it has already been completed, but one of its ' +
+            'dependencies had not been resolved');
+      }
+      if (--dependencySpec.unresolvedDependencyCount == 0) {
+        delete _deferredModules[dependentName];
+        _runFactory(dependencySpec.id, dependencySpec.modules,
+                    dependencySpec.factory, dependencySpec.module,
+                    dependencySpec.exports);
+        _modulesRemaining--;
+      }
+    });
+    delete _modulesToTheirDirectDependencies[id];
+  }
+
+  /**
+   * Get a list of dependencies without loading them yet
+   * @param {string} base The base path that modules should be relative to.
+   * @param {Array<string>} dependencies
+   * @return {Array<string>} the resolved absolute dependencies
+   */
+  function _makeDependenciesAbsolute(base, dependencies) {
+    if (!Array.isArray(dependencies)) {
+      return ['require', 'exports', 'module'];
+    }
+    return dependencies.map(function (id) {
+      return _resolveRelativeId(base, id);
+    });
   }
 
   /**
