@@ -32,16 +32,12 @@
      *     pass the exported value directly.
      */
     function define(id, dependencies, factory) {
-        // console.log("define", "###id:", id, "###dependecnise", dependencies, "###factory:", factory);
         factory = factory || dependencies || id;
-        if (!Array.isArray(dependencies)) {
-            // TODO(nevir): Default dependencies should be require, exports, module.
-            dependencies = Array.isArray(id) ? id : [];
+        if (Array.isArray(id)) {
+            dependencies = id;
         }
-        var inferredId = _inferModuleId();
-        // console.log("inferedId", inferredId);
         if (typeof id !== 'string') {
-            id = inferredId;
+            id = _inferModuleId();
         }
         // TODO(nevir): Just support \ as path separators too. Yay Windows!
         if (id.indexOf('\\') !== -1) {
@@ -53,15 +49,17 @@
         // Extract the entire module path up to the file name. Aka `dirname()`.
         //
         // TODO(nevir): This is naive; doesn't support the vulcanize case.
-        var base = inferredId.match(/^(.*?)[^\/]*$/)[1];
-
+        var base = id.match(/^(.*?)[^\/]*$/)[1];
+        if (base === '') {
+            base = id;
+        }
 
         id = fixid(id);
 
-        // console.log("base", id);
         _modules[id] = _runFactory(id, base, dependencies, factory);
         return _modules[id];
     }
+
 
     /**
      * This functions will remove extract the 'exact' name of the module's name.
@@ -94,8 +92,8 @@
 
     /** @return {string} A module id inferred from the current document/import. */
     function _inferModuleId() {
-        var script = document.currentScript;
-        if (script.hasAttribute('as')) {
+        var script = document._currentScript || document.currentScript;
+        if (script && script.hasAttribute('as')) {
             return script.getAttribute('as');
         }
 
@@ -104,12 +102,10 @@
             throw new Error('Unable to determine a module id: No baseURI for the document');
         }
 
-        if (script.hasAttribute('src')) {
-            // console.log("src", new URL(script.getAttribute('src'), doc.baseURI).toString());
+        if (script && script.hasAttribute('src')) {
             return new URL(script.getAttribute('src'), doc.baseURI).toString();
         }
 
-        // console.log("bas", doc.baseURI);
         return doc.baseURI;
     }
 
@@ -124,31 +120,41 @@
     function _runFactory(moduleId, base, dependencies, factory) {
         if (typeof factory !== 'function') return factory;
 
-        var exports, module;
-        var modules = dependencies.map(function (id) {
-            if (id === 'exports') {
-                return exports = {};
-            }
-            if (id === 'require') {
-                return _require;
-            }``
-            if (id === 'module') {
-                return module = {id: moduleId};
-            }
-            id = _resolveRelativeId(base, id);
-            return _require(id);
-        });
+        var exports = {};
+        var module = {id: moduleId};
+        var modules;
+
+        if (Array.isArray(dependencies)) {
+            modules = dependencies.map(function (id) {
+                if (id === 'exports') {
+                    return exports;
+                }
+                if (id === 'require') {
+                    return _require;
+                }
+                if (id === 'module') {
+                    return module;
+                }
+                id = _resolveRelativeId(base, id);
+                return _require(id);
+            });
+        } else {
+            modules = [_require, exports, module];
+        }
         var result = factory.apply(null, modules);
-        return (module && module.exports) || exports || result;
+        return result || module.exports || exports;
     }
 
     /**
+     * Resolve `id` relative to `base`
+     *
      * @param {string} base The module path/URI that acts as the relative base.
      * @param {string} id The module ID that should be relatively resolved.
      * @return {string} The expanded module ID.
      */
     function _resolveRelativeId(base, id) {
         if (id[0] !== '.') return id;
+        // TODO(justinfagnani): use URL
         // We need to be careful to only process the path of URLs. This regex
         // strips off the URL protocol and domain, leaving us with just the URL's
         // path.
@@ -172,8 +178,9 @@
     }
 
     function _require(id) {
-        // console.log("req", id);
+
         id = fixid(id);
+
 
         if (!(id in _modules)) {
             throw new ReferenceError('The module "' + id + '" has not been loaded');
