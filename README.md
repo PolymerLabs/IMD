@@ -1,3 +1,7 @@
+# CHANGES MADE
+
+Sometimes Module Names are not properly resolved. I added a fix which always uses the base name of the module without path or extension. This is particularly usefull when using IMD in combination with polymer and module set to AMD. 
+
 # Imports Module Definition
 
 IMD is an implementation of the
