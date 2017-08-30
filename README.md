@@ -81,7 +81,7 @@ all modules defined in HTML imports will work just fine.
 Modules are defined exactly as in other AMD systems like RequireJS:
 Public modules are defined by name:
 
-Here's the definition of a mythical module, 'squidbits', that depnds on the
+Here's the definition of a mythical module, 'squidbits', that depends on the
 modules 'tentacles.html', and 'ink':
 
 ```javascript
